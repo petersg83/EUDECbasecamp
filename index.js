@@ -1,9 +1,9 @@
-import config from './credentials';
 import mysql from 'mysql';
 import moment from 'moment';
 import _ from 'lodash';
 import isEmail from 'validator/lib/isEmail';
 import fetch from 'node-fetch';
+import config from './credentials';
 
 let token = '';
 
@@ -14,7 +14,7 @@ const fetchWithExceptions = (url, options) => fetch(url, options)
       throw new Error('Error during API call');
     }
     return JSON.parse(await response.text());
-  })
+  });
 
 const getNewToken = async () => {
   console.log('Getting new token');
@@ -35,8 +35,8 @@ const makeApiCall = (url, options) => new Promise((resolve, reject) => {
         .catch((response) => {
           console.log('Resfreshing token didn\'t work');
           console.log(response);
-        })
-    })
+        });
+    });
 });
 
 const makeDBQuery = (queryString, connection) => new Promise((resolve, reject) => {
@@ -61,7 +61,7 @@ const isStillMember = (dateString) => {
     isStillMember = isMember;
   }
   return isStillMember;
-}
+};
 
 const cleanEmail = email => (email || '').toLowerCase().trim().replace(',', '').replace('/', '');
 
@@ -129,7 +129,7 @@ const run = async () => {
   }
 
   console.log(emailsToCheck);
-}
+};
 
 run()
   .then(() => console.log('DONE !'))
