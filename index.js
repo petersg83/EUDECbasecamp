@@ -51,7 +51,7 @@ const makeDBQuery = (queryString, connection) => new Promise((resolve, reject) =
 const isStillMember = (dateString) => {
   let isStillMember = false;
   if (dateString) {
-    const now = moment();
+    const now = moment().add(-2, 'day'); // We let 2 days for the person to renew his membership
     const dates = dateString.split(';').slice(1).map(date => date.trim());
     let isMember = false;
     dates.forEach(date => {
@@ -66,69 +66,73 @@ const isStillMember = (dateString) => {
 const cleanEmail = email => (email || '').toLowerCase().trim().replace(',', '').replace('/', '');
 
 const run = async () => {
-  const peopleInBasecamp = {};
+  const peopleInBasecampByEmail = {};
   const basecampProjects = await makeApiCall(`https://3.basecampapi.com/${config.basecamp.accountId}/projects.json`, { method: 'GET', headers: { Authorization: `Bearer ${token}` } });
-
   for (const bcpProject of basecampProjects) {
     console.log('get people for project', bcpProject.name);
     let index = 1;
     let lastBulkSize = -1;
     while (lastBulkSize !== 0) {
       const somePeopleInProject = await makeApiCall(`https://3.basecampapi.com/${config.basecamp.accountId}/projects/${bcpProject.id}/people.json?page=${index}`, { method: 'GET', headers: { Authorization: `Bearer ${token}` } });
-      somePeopleInProject.forEach((person) => {
-        peopleInBasecamp[person.id] = peopleInBasecamp[person.id] || { email: person.email_address, projectsIds: [] };
-        peopleInBasecamp[person.id].projectsIds.push(bcpProject.id);
+      somePeopleInProject.forEach((person, index) => {
+        const cleanEmail = (person.email_address || '').trim().toLowerCase();
+        peopleInBasecampByEmail[cleanEmail] = peopleInBasecampByEmail[cleanEmail] || { projectsNames: [] };
+        peopleInBasecampByEmail[cleanEmail].projectsNames.push(bcpProject.name);
       });
       lastBulkSize = somePeopleInProject.length;
       index += 1;
     }
   }
-
-  let emailsToCheck = [];
-  for (const personId in peopleInBasecamp) {
-    const person = peopleInBasecamp[personId];
-    if (person.email && isEmail(person.email)) {
-      emailsToCheck.push(person.email.trim().toLowerCase());
-    } else {
-      console.log('wtf', person);
-    }
-  }
+  let emailsToCheck = Object.keys(peopleInBasecampByEmail);
 
   if (emailsToCheck.length) {
-
     const connection = mysql.createConnection({
       host: config.mysql.host,
       user: config.mysql.user,
       password: config.mysql.password,
-      database: 'd028f78b',
+      database: config.mysql.database,
     });
-
     connection.connect((err) => {
       if (err) throw err;
-      console.log('Connected!');
     });
 
-    const whereClause = `user_email_main IN ('${emailsToCheck.join("', '")}') OR user_email_secondaries REGEXP '${emailsToCheck.join('|')}'`;
-    const membersInDb = await makeDBQuery(`SELECT user.user_id, user.user_email_main, user.user_email_secondaries, membership.membership_user_id, membership.membership_dates
-      FROM user, membership
-      WHERE (${whereClause}) AND user.user_id = membership.membership_user_id AND user.user_is_deleted = 'n'
+    const membersWhereClause = `user_email_main IN ('${emailsToCheck.join("', '")}') OR user_email_secondaries REGEXP '${emailsToCheck.join('|')}'`;
+    const membersInDb = await makeDBQuery(`SELECT u.user_id, u.user_email_main, u.user_email_secondaries, m.membership_user_id, m.membership_dates
+      FROM user u, membership m
+      WHERE (${membersWhereClause}) AND u.user_id = m.membership_user_id AND u.user_is_deleted = 'n'
       ;`, connection);
-      // TODO: check for projects too
 
-      membersInDb.forEach((memberInDb) => {
-        if (isStillMember(memberInDb.membership_dates)) {
-          emailsToCheck = _.difference(emailsToCheck, [memberInDb.user_email_main || '', ...((memberInDb.user_email_secondaries || '').split(';').map(cleanEmail))]);
-        } else {
-          console.log('nottt member anymore', memberInDb.user_email_main, memberInDb.user_email_secondaries, memberInDb.membership_dates);
-        }
-      });
+    const projectsWhereClause = `p.project_email in ('${emailsToCheck.join("', '")}') OR u.user_email_main IN ('${emailsToCheck.join("', '")}') OR u.user_email_secondaries REGEXP '${emailsToCheck.join('|')}'`;
+    const projectsInDb = await makeDBQuery(`SELECT p.project_id, u.user_id, p.project_email, u.user_email_main, u.user_email_secondaries, m.membership_user_id, m.membership_dates
+      FROM project p, user u, membership m
+      WHERE (${membersWhereClause}) AND p.project_contact_user_id = u.user_id AND u.user_id = m.membership_user_id AND p.project_is_deleted = 'n';
+      ;`, connection);
 
-    connection.release();
+    membersInDb.forEach((memberInDb) => {
+      if (isStillMember(memberInDb.membership_dates)) {
+        const allEmailsOfUser = [cleanEmail(memberInDb.user_email_main) || '', ...((memberInDb.user_email_secondaries || '').split(';').map(cleanEmail))];
+        emailsToCheck = _.difference(emailsToCheck, allEmailsOfUser);
+      } else {
+        console.log('not user member anymore', memberInDb.user_email_main, memberInDb.user_email_secondaries, memberInDb.membership_dates);
+      }
+    });
+
+    projectsInDb.forEach((projectInDb) => {
+      if (isStillMember(projectInDb.membership_dates)) {
+        const allEmailsOfProject = [cleanEmail(projectInDb.project_email) || '', cleanEmail(projectInDb.user_email_main) || '', ...((projectInDb.user_email_secondaries || '').split(';').map(cleanEmail))];
+        emailsToCheck = _.difference(emailsToCheck, allEmailsOfProject);
+      } else {
+        console.log('not project member anymore', projectInDb.user_email_main, projectInDb.user_email_secondaries, projectInDb.membership_dates);
+      }
+    });
+
+    connection.end();
   } else {
     console.log('No email to check. Is Basecamp empty ?');
   }
 
-  console.log(emailsToCheck);
+  console.log(emailsToCheck.length, 'people to remove');
+  emailsToCheck.forEach(email => console.log(email, peopleInBasecampByEmail[email]));
 };
 
 run()
